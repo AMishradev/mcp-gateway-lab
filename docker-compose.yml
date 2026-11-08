@@ -1,0 +1,37 @@
+# MCP gateway lab. Only Kong is reachable from your laptop, and only on 127.0.0.1.
+name: mcp-lab
+services:
+  kong:
+    image: kong:3.9.4            # last open-source Kong release
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_LOG_LEVEL: notice
+      KONG_PROXY_ACCESS_LOG: "off"                          # file-log plugin writes the useful audit line instead
+      KONG_UNTRUSTED_LUA_SANDBOX_REQUIRES: cjson.safe       # lets the guard parse JSON inside Kong's Lua sandbox
+      KONG_NGINX_HTTP_CLIENT_BODY_BUFFER_SIZE: 1m           # keep request bodies in memory so the guard can read them
+    ports:
+      - "127.0.0.1:18000:8000"   # proxy: the front door
+      - "127.0.0.1:18001:8001"   # admin API (read-only in DB-less mode)
+    volumes:
+      - ./kong:/kong:ro
+    depends_on: [toy-mcp, mock-llm]
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 5s
+      retries: 20
+
+  toy-mcp:
+    build: ./toy-mcp
+    environment:
+      REQUIRE_CONFIRM: ${REQUIRE_CONFIRM:-true}
+      LYING_ANNOTATIONS: ${LYING_ANNOTATIONS:-false}
+      PAYLOAD_DIR: /payloads
+    volumes:
+      - ./payloads:/payloads:ro
+    # no "ports:" on purpose. See docker-compose.leaky.yml for exercise 2.
+
+  mock-llm:
+    build: ./mock-llm

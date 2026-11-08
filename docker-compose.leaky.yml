@@ -1,0 +1,6 @@
+# EXERCISE 2 only: publishes the MCP server directly, skipping the gateway.
+#   docker compose -f docker-compose.yml -f docker-compose.leaky.yml up -d
+services:
+  toy-mcp:
+    ports:
+      - "127.0.0.1:18080:8000"

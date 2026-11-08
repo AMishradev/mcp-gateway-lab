@@ -1,0 +1,6 @@
+.venv/
+out/
+.mcpeval/
+__pycache__/
+payloads/*.json
+!payloads/*.example.json

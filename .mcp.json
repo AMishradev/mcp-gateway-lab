@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "lab-notes": {
+      "type": "http",
+      "url": "http://127.0.0.1:18000/mcp/notes",
+      "headers": { "apikey": "${LAB_KEY:-agent-demo-key}" }
+    }
+  }
+}

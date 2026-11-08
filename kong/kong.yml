@@ -1,0 +1,132 @@
+# Kong declarative config (DB-less). Edit, then `make reload`.
+# Keys below are demo keys for a lab that only listens on 127.0.0.1. Never reuse them anywhere.
+_format_version: "3.0"
+
+consumers:
+  - username: alice          # a human
+    custom_id: human
+    keyauth_credentials: [{key: human-demo-key}]
+    acls: [{group: humans}]
+  - username: notes-bot      # an autonomous agent
+    custom_id: agent
+    keyauth_credentials: [{key: agent-demo-key}]
+    acls: [{group: agents}]
+    plugins:
+      - name: rate-limiting  # agents get a tighter budget than people
+        config: {minute: 30, policy: local}
+
+services:
+  # ---------------------------------------------------------------- MCP
+  - name: notes
+    url: http://toy-mcp:8000/mcp
+    routes:
+      # The "right" way: login, roles, per-tool guard, size limit, audit log.
+      - name: notes-guarded
+        paths: [/mcp/notes]
+        strip_path: true
+        plugins:
+          - name: key-auth
+            config: {key_names: [apikey], hide_credentials: true}
+          - name: acl
+            config: {allow: [humans, agents]}
+          - name: rate-limiting
+            config: {minute: 120, policy: local}
+          - name: request-size-limiting
+            config: {allowed_payload_size: 256, size_unit: kilobytes}
+          - name: post-function    # runs after auth, so it knows who is calling
+            config:
+              access:
+                - |
+                  -- MCP tool guard. Reads the JSON-RPC body; Kong OSS has no MCP plugin, so we parse it ourselves.
+                  local cjson = require "cjson.safe"
+                  -- Tools an agent key may never call (DML-destructive and DDL). Humans still can (and the server asks them to confirm).
+                  local DENY_FOR_AGENTS = { lab_delete_note = true, lab_drop_notebook = true }
+
+                  local consumer = kong.client.get_consumer()
+                  local role = consumer and consumer.custom_id or "anonymous"
+                  local raw = kong.request.get_raw_body()
+                  local msg = raw and cjson.decode(raw)
+                  if type(msg) ~= "table" then return end
+                  local method = msg.method
+                  local tool = type(msg.params) == "table" and msg.params.name or nil
+
+                  -- what the audit log records for every request (see `make logs`)
+                  kong.log.set_serialize_value("mcp", { method = method, tool = tool, role = role,
+                                                        header_name = kong.request.get_header("mcp-name") })
+
+                  -- A client that says one tool in the header and another in the body is lying (or buggy).
+                  local hname = kong.request.get_header("mcp-name")
+                  if method == "tools/call" and hname and tool and hname ~= tool then
+                    return kong.response.exit(400, { jsonrpc = "2.0", id = msg.id,
+                      error = { code = -32020, message = "Mcp-Name header does not match the tool in the body" } })
+                  end
+
+                  if method == "tools/call" and role == "agent" and DENY_FOR_AGENTS[tool] then
+                    -- Answer as a normal tool result so the agent reads the reason instead of seeing a network error.
+                    return kong.response.exit(200, { jsonrpc = "2.0", id = msg.id, result = { resultType = "complete", isError = true,
+                      content = { { type = "text", text = "Blocked by the gateway: agent keys may not call " .. tool ..
+                                    ". Ask a human to do this with their own key." } } } },
+                      { ["Content-Type"] = "application/json" })
+                  end
+          - name: file-log
+            config: {path: /dev/stdout, reopen: false}
+
+      # EXERCISE 1: a route someone forgot to protect. Same server, no login, no guard.
+      - name: notes-naked
+        paths: [/mcp/naked]
+        strip_path: true
+        plugins:
+          - name: file-log
+            config: {path: /dev/stdout, reopen: false}
+
+  # EXERCISE 4: a naive guard that trusts the Mcp-Name header instead of reading the body.
+  - name: notes-header-guard
+    url: http://toy-mcp:8000/mcp
+    routes:
+      - name: header-guard-block     # more specific route (has a header match) wins
+        paths: [/mcp/header-guard]
+        strip_path: true
+        headers:
+          mcp-name: [lab_delete_note, lab_drop_notebook]
+        plugins:
+          - name: request-termination
+            config: {status_code: 403, message: "blocked by header guard"}
+      - name: header-guard-pass
+        paths: [/mcp/header-guard]
+        strip_path: true
+        plugins:
+          - name: key-auth
+            config: {key_names: [apikey], hide_credentials: true}
+          - name: file-log
+            config: {path: /dev/stdout, reopen: false}
+
+  # ---------------------------------------------------------------- LLM (Kong's AI plugins)
+  # Any OpenAI-style chat client can call /llm/chat; Kong translates to Anthropic's format and sends it to the mock.
+  - name: llm
+    url: http://mock-llm:8080      # ai-proxy overrides the target; this is only a placeholder
+    routes:
+      - name: llm-chat
+        paths: [/llm/chat]
+        plugins:
+          - name: key-auth
+            config: {key_names: [apikey], hide_credentials: true}
+          - name: ai-prompt-guard
+            config:
+              # Detection patterns, checked against user messages before they reach the model.
+              deny_patterns:
+                - "(?i).*ignore (all )?(previous|prior) instructions.*"
+                - ".*AKIA[0-9A-Z]{16}.*"
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth: {header_name: x-api-key, header_value: mock-key}
+              model:
+                provider: anthropic
+                name: claude-haiku-5-5
+                options:
+                  anthropic_version: "2023-06-01"
+                  max_tokens: 256
+                  upstream_url: http://mock-llm:8080/v1/messages
+              logging: {log_statistics: true, log_payloads: false}
+          - name: file-log
+            config: {path: /dev/stdout, reopen: false}
